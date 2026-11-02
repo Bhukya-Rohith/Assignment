@@ -1,0 +1,22 @@
+{
+  "name": "The Duane Penthouse",
+  "location": "Tribeca, New York City",
+  "price": "$8,200,000",
+  "property_type": "Duplex Penthouse Loft",
+  "features": [
+    "Private Keyed Elevator Access",
+    "Wrap-Around Sunset Terrace",
+    "Calacatta Gold Marble Fireplace",
+    "Custom Glass Wine Cellar"
+  ],
+  "contact_cta": "Schedule a private preview with Manhattan Advisory",
+  "phone": "+1 (212) 555-0144",
+  "email": "tribeca@luxuryadvisory.com",
+  "image_paths": [
+    "images/penthouse/01_exterior.jpg",
+    "images/penthouse/02_living_room.jpg",
+    "images/penthouse/03_terrace.jpg",
+    "images/penthouse/04_fireplace.jpg",
+    "images/penthouse/05_wine_cellar.jpg"
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "The Obsidian Villa",
+  "location": "Bel Air, Los Angeles",
+  "price": "$14,500,000",
+  "property_type": "Ultra-Luxury Architectural Villa",
+  "features": [
+    "Infinity Edge Horizon Pool",
+    "Sub-Zero and Gaggenau Chef Kitchen",
+    "Panoramic Downtown Skyline Views",
+    "Automated Crestron Smart Home"
+  ],
+  "contact_cta": "Presented exclusively by Beverly Hills Luxury Estates",
+  "phone": "+1 (310) 555-0199",
+  "email": "inquiries@bhresidences.com",
+  "image_paths": [
+    "images/villa/01_exterior.jpg",
+    "images/villa/02_living_room.jpg",
+    "images/villa/03_kitchen.jpg",
+    "images/villa/04_master_bedroom.jpg",
+    "images/villa/05_pool_terrace.jpg"
+  ]
+}

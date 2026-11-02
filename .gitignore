@@ -1,0 +1,25 @@
+# Byte-compiled / optimized / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Virtual Environments
+venv/
+env/
+.venv/
+ENV/
+
+# Environment Variables & Secrets
+.env
+*.env
+
+# Output Exports (large generated video files)
+exports/
+
+# macOS metadata
+.DS_Store
+
+# IDE / Editor folders
+.vscode/
+.idea/

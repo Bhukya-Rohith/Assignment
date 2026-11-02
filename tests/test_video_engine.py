@@ -22,25 +22,38 @@ def test_crop_and_scale_image(tmp_path):
 
 
 def test_render_lower_third_card():
-    # Landscape card
-    overlay_16_9 = render_lower_third_card(
+    # Landscape hook scene
+    overlay_hook = render_lower_third_card(
         title="The Obsidian Villa",
         subtitle="Bel Air • Luxury Architectural Villa",
         badge="$14,500,000",
         canvas_size=(1920, 1080),
+        scene_type="hook",
     )
-    assert isinstance(overlay_16_9, np.ndarray)
-    assert overlay_16_9.shape == (1080, 1920, 4)
+    assert isinstance(overlay_hook, np.ndarray)
+    assert overlay_hook.shape == (1080, 1920, 4)
 
-    # Portrait card
-    overlay_9_16 = render_lower_third_card(
-        title="The Duane Penthouse",
+    # Landscape exploration scene
+    overlay_explore = render_lower_third_card(
+        title="Infinity Edge Pool",
+        subtitle="The Obsidian Villa • Bel Air",
+        badge="Featured Space",
+        canvas_size=(1920, 1080),
+        scene_type="exploration",
+    )
+    assert isinstance(overlay_explore, np.ndarray)
+    assert overlay_explore.shape == (1080, 1920, 4)
+
+    # Portrait outro scene
+    overlay_outro = render_lower_third_card(
+        title="Schedule Your Private Tour",
         subtitle="Tribeca • Duplex Penthouse",
         badge="$8,200,000",
         canvas_size=(1080, 1920),
+        scene_type="outro",
     )
-    assert isinstance(overlay_9_16, np.ndarray)
-    assert overlay_9_16.shape == (1920, 1080, 4)
+    assert isinstance(overlay_outro, np.ndarray)
+    assert overlay_outro.shape == (1920, 1080, 4)
 
 
 def test_pipeline_config_dimensions():

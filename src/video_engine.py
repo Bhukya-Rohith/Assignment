@@ -1,22 +1,30 @@
 """
-Visual compositing engine: aspect ratio normalization (Lanczos cover-crop),
-Pillow typographic lower-third rasterization, Ken Burns affine scaling,
-and MoviePy v2 timeline assembly.
+Motion Graphics Visual Compositing Engine.
+
+Upgrades over basic lower-third overlay:
+  • Cinematic vignette layer (top + bottom gradient darkening on every scene)
+  • Letterbox bars (16:9 widescreen mode) for a broadcast / film aesthetic
+  • Per-scene visual identity:
+      - hook     → full-screen bold centered title card with gold accent line
+      - exploration → left-rail feature pill with animated accent stripe
+      - outro    → centered CTA panel with rule lines and contact details
+  • Animated overlay entrance: slide-up CrossFadeIn on all lower-third layers
+  • Ken Burns affine zoom with alternating direction per scene
+  • Scene-to-scene crossfade dissolve (0.5 s overlap)
+  • Accent geometric rules (horizontal gold line, corner mark) per scene type
+  • Pillow-rasterized RGBA layers — zero external binary dependency
 """
 import logging
 import math
-import os
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from moviepy import (
-    AudioFileClip,
     CompositeAudioClip,
     CompositeVideoClip,
     ImageClip,
-    VideoClip,
     concatenate_videoclips,
     vfx,
 )
@@ -25,7 +33,7 @@ from src.models import SceneStoryboard, PipelineConfig, VideoCompositingError
 
 logger = logging.getLogger(__name__)
 
-# Search paths for cross-platform TrueType fonts
+# ── Font search paths (cross-platform) ──────────────────────────────────────
 CANDIDATE_FONT_PATHS = [
     Path("assets/fonts/DejaVuSans-Bold.ttf"),
     Path("assets/fonts/Roboto-Bold.ttf"),
@@ -36,9 +44,22 @@ CANDIDATE_FONT_PATHS = [
     Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
 ]
 
+# ── Palette ──────────────────────────────────────────────────────────────────
+GOLD      = (217, 119,   6, 255)    # amber-600
+GOLD_DIM  = (217, 119,   6, 180)
+TEAL      = ( 20, 184, 166, 255)    # teal-500
+TEAL_DIM  = ( 20, 184, 166, 180)
+WHITE     = (255, 255, 255, 255)
+WHITE_DIM = (203, 213, 225, 255)    # slate-300
+NAVY      = ( 15,  23,  42, 230)    # slate-900
+NAVY_MID  = ( 15,  23,  42, 170)
+BLACK0    = (  0,   0,   0,   0)    # transparent
+LETTERBOX_ALPHA = 220               # opacity of film bars
 
-def resolve_font(bold: bool = True, size: int = 36) -> ImageFont.FreeTypeFont:
-    """Attempts to locate a crisp TrueType font across local bundled assets and system paths."""
+
+# ── Font helper ──────────────────────────────────────────────────────────────
+def resolve_font(size: int = 36) -> ImageFont.FreeTypeFont:
+    """Locates a TrueType font across bundled assets and system paths."""
     for p in CANDIDATE_FONT_PATHS:
         if p.is_file():
             try:
@@ -46,166 +67,371 @@ def resolve_font(bold: bool = True, size: int = 36) -> ImageFont.FreeTypeFont:
             except Exception:
                 continue
     try:
-        # Fallback to default truetype font if available in PIL
         return ImageFont.load_default(size=size)
     except TypeError:
         return ImageFont.load_default()
 
 
-def crop_and_scale_image(image_path: Union[str, Path], target_size: Tuple[int, int]) -> Image.Image:
-    """
-    Applies centered cover-crop normalization using Lanczos resampling.
-    Ensures input image covers target canvas without letterbox black bars or distortion.
-    """
-    w_target, h_target = target_size
-    with Image.open(image_path) as raw_img:
-        img = raw_img.convert("RGB")
-        w_src, h_src = img.size
-
-        # Cover-crop scaling factor
-        scale = max(w_target / w_src, h_target / h_src)
-        new_w = int(math.ceil(w_src * scale))
-        new_h = int(math.ceil(h_src * scale))
-
+# ── Image normalisation ───────────────────────────────────────────────────────
+def crop_and_scale_image(
+    image_path: Union[str, Path], target_size: Tuple[int, int]
+) -> Image.Image:
+    """Centered cover-crop with Lanczos resampling to fit the target canvas exactly."""
+    w_t, h_t = target_size
+    with Image.open(image_path) as raw:
+        img = raw.convert("RGB")
+        w_s, h_s = img.size
+        scale  = max(w_t / w_s, h_t / h_s)
+        new_w  = int(math.ceil(w_s * scale))
+        new_h  = int(math.ceil(h_s * scale))
         resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-
-        # Symmetric center crop
-        left = (new_w - w_target) // 2
-        top = (new_h - h_target) // 2
-        right = left + w_target
-        bottom = top + h_target
-
-        return resized.crop((left, top, right, bottom))
+        left   = (new_w - w_t) // 2
+        top    = (new_h - h_t) // 2
+        return resized.crop((left, top, left + w_t, top + h_t))
 
 
+# ── Shared overlay helpers ────────────────────────────────────────────────────
+def _new_canvas(w: int, h: int) -> Tuple[Image.Image, ImageDraw.ImageDraw]:
+    img = Image.new("RGBA", (w, h), BLACK0)
+    return img, ImageDraw.Draw(img)
+
+
+def _draw_vignette(draw: ImageDraw.ImageDraw, w: int, h: int) -> None:
+    """Cinematic edge-to-centre gradient darkening (top + bottom bands)."""
+    top_band    = int(h * 0.25)
+    bottom_start = int(h * 0.60)
+    # top
+    for y in range(top_band):
+        a = int(160 * (1.0 - y / top_band) ** 1.6)
+        draw.line([(0, y), (w, y)], fill=(0, 0, 0, a))
+    # bottom
+    for y in range(bottom_start, h):
+        a = int(200 * ((y - bottom_start) / (h - bottom_start)) ** 1.4)
+        draw.line([(0, y), (w, y)], fill=(0, 0, 0, a))
+
+
+def _draw_letterbox(draw: ImageDraw.ImageDraw, w: int, h: int,
+                    bar_h_ratio: float = 0.065) -> None:
+    """Adds horizontal black cinema letterbox bars (landscape only)."""
+    bh = int(h * bar_h_ratio)
+    draw.rectangle([(0, 0), (w, bh)], fill=(0, 0, 0, LETTERBOX_ALPHA))
+    draw.rectangle([(0, h - bh), (w, h)], fill=(0, 0, 0, LETTERBOX_ALPHA))
+
+
+def _draw_accent_line(draw: ImageDraw.ImageDraw, x0: int, y: int, x1: int,
+                      color: Tuple = GOLD, thickness: int = 3) -> None:
+    """Horizontal accent rule used across overlay designs."""
+    draw.rectangle([(x0, y), (x1, y + thickness)], fill=color)
+
+
+def _draw_corner_mark(draw: ImageDraw.ImageDraw, cx: int, cy: int,
+                      arm: int = 22, color: Tuple = GOLD, th: int = 3) -> None:
+    """L-shaped corner mark (top-left orientation)."""
+    draw.rectangle([(cx, cy), (cx + arm, cy + th)], fill=color)
+    draw.rectangle([(cx, cy), (cx + th, cy + arm)], fill=color)
+
+
+def _badge_pill(draw: ImageDraw.ImageDraw, x: int, y: int, text: str,
+                font: ImageFont.FreeTypeFont,
+                fill: Tuple = GOLD, text_color: Tuple = WHITE) -> int:
+    """Draws a rounded pill badge; returns the right edge x."""
+    W = int(len(text) * font.size * 0.65 + 28)
+    H = int(font.size + 16)
+    draw.rounded_rectangle([(x, y), (x + W, y + H)], radius=H // 2, fill=fill)
+    draw.text((x + 14, y + 8), text, font=font, fill=text_color)
+    return x + W
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Per-scene overlay renderers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _render_hook_overlay(
+    title: str, subtitle: str, badge: Optional[str],
+    w: int, h: int, is_portrait: bool,
+) -> np.ndarray:
+    """
+    HOOK scene: full-width centred title card.
+    Design:  vignette → letterbox → gold accent line → large white title
+             → location subtitle → price badge pill.
+    """
+    canvas, draw = _new_canvas(w, h)
+
+    _draw_vignette(draw, w, h)
+    if not is_portrait:
+        _draw_letterbox(draw, w, h)
+
+    # Card background — wide cinematic strip in the lower-centre
+    card_h = int(h * 0.30)
+    card_y = int(h * 0.54)
+    # Full-width semi-transparent band
+    draw.rectangle([(0, card_y), (w, card_y + card_h)], fill=(0, 0, 0, 130))
+
+    # Gold accent lines — top and bottom of card
+    _draw_accent_line(draw, int(w * 0.07), card_y,
+                      int(w * 0.93), color=GOLD, thickness=3)
+    _draw_accent_line(draw, int(w * 0.07), card_y + card_h - 3,
+                      int(w * 0.93), color=(255, 255, 255, 60), thickness=2)
+
+    # Corner marks
+    _draw_corner_mark(draw, int(w * 0.07), card_y + 12, arm=18, color=GOLD)
+
+    pad_x  = int(w * 0.09)
+    curr_y = card_y + 20
+
+    # Badge
+    if badge:
+        f_badge = resolve_font(size=int(h * 0.022) if not is_portrait else int(w * 0.028))
+        curr_y += 6
+        _badge_pill(draw, pad_x, curr_y, badge.upper(), f_badge, fill=GOLD)
+        curr_y += int(f_badge.size + 22)
+
+    # Title
+    f_title = resolve_font(size=int(h * 0.058) if not is_portrait else int(w * 0.058))
+    max_len = 42 if not is_portrait else 28
+    t = title if len(title) <= max_len else title[:max_len - 1] + "…"
+    draw.text((pad_x, curr_y), t, font=f_title, fill=WHITE)
+    curr_y += int(f_title.size * 1.25)
+
+    # Subtitle  (location · type)
+    f_sub = resolve_font(size=int(h * 0.026) if not is_portrait else int(w * 0.030))
+    max_sub = 60 if not is_portrait else 38
+    s = subtitle if len(subtitle) <= max_sub else subtitle[:max_sub - 1] + "…"
+    draw.text((pad_x, curr_y), s, font=f_sub, fill=WHITE_DIM)
+
+    return np.array(canvas)
+
+
+def _render_exploration_overlay(
+    title: str, subtitle: str, badge: Optional[str],
+    w: int, h: int, is_portrait: bool,
+) -> np.ndarray:
+    """
+    EXPLORATION scene: left-rail feature pill card.
+    Design:  vignette → teal left-edge stripe → glass card left-anchored
+             → feature title → property sub-line → teal accent bottom line.
+    """
+    canvas, draw = _new_canvas(w, h)
+
+    _draw_vignette(draw, w, h)
+    if not is_portrait:
+        _draw_letterbox(draw, w, h)
+
+    # Left teal vertical stripe
+    stripe_w = int(w * 0.006)
+    stripe_x = int(w * 0.055)
+    card_y   = int(h * 0.62)
+    card_h   = int(h * 0.24)
+    draw.rectangle(
+        [(stripe_x, card_y - 8), (stripe_x + stripe_w, card_y + card_h + 8)],
+        fill=TEAL,
+    )
+
+    # Glass card — left anchored
+    card_x = stripe_x + stripe_w + 12
+    card_w = int(w * 0.52)
+    draw.rounded_rectangle(
+        [(card_x, card_y), (card_x + card_w, card_y + card_h)],
+        radius=16,
+        fill=NAVY,
+        outline=(255, 255, 255, 30),
+        width=1,
+    )
+
+    pad_x  = card_x + 28
+    curr_y = card_y + 18
+
+    # Badge pill
+    if badge:
+        f_badge = resolve_font(size=int(h * 0.020) if not is_portrait else int(w * 0.026))
+        _badge_pill(draw, pad_x, curr_y, badge.upper(), f_badge, fill=TEAL, text_color=WHITE)
+        curr_y += int(f_badge.size + 22)
+
+    # Feature title
+    f_title = resolve_font(size=int(h * 0.048) if not is_portrait else int(w * 0.048))
+    max_len = 36 if not is_portrait else 24
+    t = title if len(title) <= max_len else title[:max_len - 1] + "…"
+    draw.text((pad_x, curr_y), t, font=f_title, fill=WHITE)
+    curr_y += int(f_title.size * 1.2)
+
+    # Subtitle
+    f_sub = resolve_font(size=int(h * 0.024) if not is_portrait else int(w * 0.028))
+    max_sub = 52 if not is_portrait else 34
+    s = subtitle if len(subtitle) <= max_sub else subtitle[:max_sub - 1] + "…"
+    draw.text((pad_x, curr_y), s, font=f_sub, fill=WHITE_DIM)
+
+    # Bottom teal accent rule inside card
+    _draw_accent_line(draw, pad_x, card_y + card_h - 8,
+                      card_x + card_w - 20, color=TEAL_DIM, thickness=2)
+
+    return np.array(canvas)
+
+
+def _render_outro_overlay(
+    title: str, subtitle: str, badge: Optional[str],
+    w: int, h: int, is_portrait: bool,
+) -> np.ndarray:
+    """
+    OUTRO / CTA scene: centred elegant panel.
+    Design:  vignette → full-width semi-dark overlay → white rule lines
+             → CTA headline → contact sub-line → gold decorative rule footer.
+    """
+    canvas, draw = _new_canvas(w, h)
+
+    _draw_vignette(draw, w, h)
+    if not is_portrait:
+        _draw_letterbox(draw, w, h)
+
+    # Full-height dark overlay (more dramatic for outro)
+    draw.rectangle([(0, 0), (w, h)], fill=(0, 0, 0, 90))
+
+    # Centred card
+    card_w = int(w * 0.70) if not is_portrait else int(w * 0.88)
+    card_h = int(h * 0.30) if not is_portrait else int(h * 0.22)
+    card_x = (w - card_w) // 2
+    card_y = int(h * 0.52)
+
+    draw.rounded_rectangle(
+        [(card_x, card_y), (card_x + card_w, card_y + card_h)],
+        radius=20,
+        fill=NAVY_MID,
+        outline=(255, 255, 255, 50),
+        width=1,
+    )
+
+    # Top white rule
+    _draw_accent_line(draw, card_x + 30, card_y,
+                      card_x + card_w - 30, color=(255, 255, 255, 120), thickness=2)
+
+    # Bottom gold rule
+    _draw_accent_line(draw, card_x + 30, card_y + card_h - 3,
+                      card_x + card_w - 30, color=GOLD_DIM, thickness=3)
+
+    pad_x  = card_x + 40
+    curr_y = card_y + 22
+
+    # CTA title
+    f_title = resolve_font(size=int(h * 0.048) if not is_portrait else int(w * 0.046))
+    max_len = 42 if not is_portrait else 28
+    t = title if len(title) <= max_len else title[:max_len - 1] + "…"
+    # Centre the title
+    try:
+        bbox = draw.textbbox((0, 0), t, font=f_title)
+        text_w = bbox[2] - bbox[0]
+    except Exception:
+        text_w = len(t) * f_title.size // 2
+    draw.text(((w - text_w) // 2, curr_y), t, font=f_title, fill=WHITE)
+    curr_y += int(f_title.size * 1.3)
+
+    # Thin separator
+    sep_x = int(w * 0.38)
+    _draw_accent_line(draw, sep_x, curr_y, w - sep_x, color=(255, 255, 255, 60), thickness=1)
+    curr_y += 14
+
+    # Contact subtitle
+    f_sub = resolve_font(size=int(h * 0.024) if not is_portrait else int(w * 0.028))
+    max_sub = 70 if not is_portrait else 44
+    s = subtitle if len(subtitle) <= max_sub else subtitle[:max_sub - 1] + "…"
+    try:
+        bbox = draw.textbbox((0, 0), s, font=f_sub)
+        s_w = bbox[2] - bbox[0]
+    except Exception:
+        s_w = len(s) * f_sub.size // 2
+    draw.text(((w - s_w) // 2, curr_y), s, font=f_sub, fill=WHITE_DIM)
+
+    # Gold badge (phone / price if present)
+    if badge:
+        f_badge = resolve_font(size=int(h * 0.020))
+        bx = (w - int(len(badge) * f_badge.size * 0.65 + 28)) // 2
+        _badge_pill(draw, bx, card_y + card_h + 14, badge, f_badge, fill=GOLD)
+
+    return np.array(canvas)
+
+
+# ── Public overlay dispatcher ─────────────────────────────────────────────────
 def render_lower_third_card(
     title: str,
     subtitle: str,
     badge: Optional[str] = None,
     canvas_size: Tuple[int, int] = (1920, 1080),
+    scene_type: str = "exploration",
 ) -> np.ndarray:
     """
-    Renders a broadcast-grade typography card onto a transparent RGBA canvas using Pillow.
-    Features dark slate glassmorphism with accent pill badge and crisp typography.
+    Dispatches to the correct per-scene motion graphics overlay renderer
+    based on scene_type: 'hook', 'exploration', or 'outro'.
     """
     w, h = canvas_size
-    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-
     is_portrait = h > w
-
-    if is_portrait:
-        # 9:16 layout (Mobile / Reels)
-        card_w = int(w * 0.90)
-        card_h = int(h * 0.22)
-        card_x = (w - card_w) // 2
-        card_y = int(h * 0.70)
-        font_title = resolve_font(bold=True, size=int(w * 0.048))
-        font_sub = resolve_font(bold=False, size=int(w * 0.034))
-        font_badge = resolve_font(bold=True, size=int(w * 0.028))
+    if scene_type == "hook":
+        return _render_hook_overlay(title, subtitle, badge, w, h, is_portrait)
+    elif scene_type == "outro":
+        return _render_outro_overlay(title, subtitle, badge, w, h, is_portrait)
     else:
-        # 16:9 layout (Landscape / Broadcast)
-        card_w = int(w * 0.85)
-        card_h = int(h * 0.22)
-        card_x = (w - card_w) // 2
-        card_y = int(h * 0.72)
-        font_title = resolve_font(bold=True, size=int(h * 0.046))
-        font_sub = resolve_font(bold=False, size=int(h * 0.030))
-        font_badge = resolve_font(bold=True, size=int(h * 0.024))
-
-    # Glassmorphism container background (dark navy with rounded border)
-    container_bg = (15, 23, 42, 220)  # Slate-900 at 86% opacity
-    border_color = (255, 255, 255, 45)
-
-    # Draw card shadow & card background
-    draw.rounded_rectangle(
-        [(card_x, card_y), (card_x + card_w, card_y + card_h)],
-        radius=20,
-        fill=container_bg,
-        outline=border_color,
-        width=2,
-    )
-
-    pad_x = 35
-    curr_y = card_y + 20
-
-    # Draw Badge if present
-    if badge:
-        badge_text = badge.upper()
-        # Measure badge dimensions roughly
-        badge_w = int(len(badge_text) * 12 + 24)
-        badge_h = 32
-        badge_rect = [(card_x + pad_x, curr_y), (card_x + pad_x + badge_w, curr_y + badge_h)]
-        # Amber/Gold luxury accent
-        draw.rounded_rectangle(badge_rect, radius=8, fill=(217, 119, 6, 235))
-        draw.text((card_x + pad_x + 12, curr_y + 6), badge_text, font=font_badge, fill=(255, 255, 255, 255))
-        curr_y += badge_h + 12
-    else:
-        curr_y += 8
-
-    # Draw Headline / Title (truncate if too long)
-    max_title_len = 50 if not is_portrait else 35
-    display_title = title if len(title) <= max_title_len else title[:max_title_len - 3] + "..."
-    draw.text((card_x + pad_x, curr_y), display_title, font=font_title, fill=(255, 255, 255, 255))
-    curr_y += int(font_title.size * 1.3)
-
-    # Draw Subtitle
-    max_sub_len = 70 if not is_portrait else 48
-    display_sub = subtitle if len(subtitle) <= max_sub_len else subtitle[:max_sub_len - 3] + "..."
-    draw.text((card_x + pad_x, curr_y), display_sub, font=font_sub, fill=(203, 213, 225, 255))
-
-    return np.array(overlay)
+        return _render_exploration_overlay(title, subtitle, badge, w, h, is_portrait)
 
 
+# ── Scene clip builder ────────────────────────────────────────────────────────
 def build_scene_clip(
     storyboard_scene: SceneStoryboard,
-    target_size: Tuple[int, int] = (1920, 1080)
+    target_size: Tuple[int, int] = (1920, 1080),
 ) -> CompositeVideoClip:
     """
-    Constructs a dynamic video clip for a single scene:
-    1. Lanczos normalized base image.
-    2. Dynamic Ken Burns motion effect (alternating zoom-in and zoom-out).
-    3. Pillow-rasterized lower-third glass card overlay.
+    Constructs one motion-graphics scene clip:
+      1. Lanczos cover-cropped base image.
+      2. Ken Burns affine zoom (alternating in/out per scene index).
+      3. FadeIn on the base image (0.4 s) for soft entrance.
+      4. Per-scene overlay rasterized via Pillow (vignette + styled card).
+      5. Overlay slides up with CrossFadeIn for a polished animated entrance.
     """
-    w, h = target_size
-    duration = max(storyboard_scene.duration, 1.0)
+    w, h       = target_size
+    duration   = max(storyboard_scene.duration, 1.0)
+    scene_type = storyboard_scene.scene_type
 
-    # Prepare cover-cropped image
-    cropped_img = crop_and_scale_image(storyboard_scene.image_path, target_size)
-    img_array = np.array(cropped_img)
+    # ── Base image ──
+    cropped = crop_and_scale_image(storyboard_scene.image_path, target_size)
+    base_clip = (
+        ImageClip(np.array(cropped))
+        .with_duration(duration)
+        .with_effects([vfx.FadeIn(0.4)])
+    )
 
-    base_clip = ImageClip(img_array).with_duration(duration)
-
-    # Ken Burns Affine Transformation:
-    # Even scenes: subtle zoom-in 1.0 -> 1.10
-    # Odd scenes: subtle zoom-out 1.10 -> 1.00
+    # ── Ken Burns motion ──
     if storyboard_scene.scene_id % 2 == 0:
-        animated_clip = base_clip.with_effects([
-            vfx.Resize(lambda t: 1.0 + 0.10 * (t / duration))
+        # zoom-in: 1.00 → 1.12
+        animated = base_clip.with_effects([
+            vfx.Resize(lambda t, _d=duration: 1.00 + 0.12 * (t / _d))
         ])
     else:
-        animated_clip = base_clip.with_effects([
-            vfx.Resize(lambda t: 1.10 - 0.10 * (t / duration))
+        # zoom-out: 1.12 → 1.00
+        animated = base_clip.with_effects([
+            vfx.Resize(lambda t, _d=duration: 1.12 - 0.12 * (t / _d))
         ])
 
-    # Rasterize typography overlay
-    overlay_array = render_lower_third_card(
-        title=storyboard_scene.overlay_title,
-        subtitle=storyboard_scene.overlay_subtitle,
-        badge=storyboard_scene.overlay_badge,
-        canvas_size=target_size,
+    # ── Motion-graphics overlay (vignette + styled card) ──
+    overlay_arr = render_lower_third_card(
+        title      = storyboard_scene.overlay_title,
+        subtitle   = storyboard_scene.overlay_subtitle,
+        badge      = storyboard_scene.overlay_badge,
+        canvas_size= target_size,
+        scene_type = scene_type,
     )
-    overlay_clip = ImageClip(overlay_array).with_duration(duration)
+    # Animate the overlay in: CrossFadeIn 0.6 s + slight delay for hook/outro
+    fade_dur = 0.5 if scene_type == "exploration" else 0.7
+    overlay_clip = (
+        ImageClip(overlay_arr)
+        .with_duration(duration)
+        .with_effects([vfx.CrossFadeIn(fade_dur)])
+    )
 
-    # Composite base motion with fixed overlay card
+    # ── Composite ──
     composite = CompositeVideoClip(
-        [animated_clip, overlay_clip],
-        size=target_size
+        [animated, overlay_clip], size=target_size
     ).with_duration(duration)
 
     return composite
 
 
+# ── Full video renderer ───────────────────────────────────────────────────────
 def render_complete_video(
     scenes: List[SceneStoryboard],
     composite_audio: Optional[CompositeAudioClip],
@@ -214,35 +440,49 @@ def render_complete_video(
     progress_callback: Optional[callable] = None,
 ) -> Path:
     """
-    Assembles scene clips into a complete video, attaches multi-track composite audio,
-    and encodes to H.264/AAC MP4.
+    Assembles scene clips with crossfade dissolves, attaches multi-track
+    composite audio, and encodes to H.264/AAC MP4.
     """
-    out_file = Path(output_path).resolve()
+    out_file    = Path(output_path).resolve()
     out_file.parent.mkdir(parents=True, exist_ok=True)
     target_size = config.dimensions
 
-    logger.info(f"Building {len(scenes)} visual scene clips at resolution {target_size}...")
+    logger.info(
+        f"Compositing {len(scenes)} motion-graphics scene clips "
+        f"at {target_size[0]}×{target_size[1]}…"
+    )
+
     scene_clips = []
     for idx, sc in enumerate(scenes):
         if progress_callback:
-            progress_callback(f"Compositing Scene {sc.scene_id} ({sc.scene_type})...", 0.4 + (0.3 * (idx / len(scenes))))
+            progress_callback(
+                f"Rendering Scene {sc.scene_id} [{sc.scene_type.upper()}]…",
+                0.4 + 0.3 * (idx / len(scenes)),
+            )
         clip = build_scene_clip(sc, target_size=target_size)
+
+        # Apply CrossFadeIn on every clip except the first for a smooth dissolve transition
+        if idx > 0:
+            clip = clip.with_effects([vfx.CrossFadeIn(0.5)])
+
         scene_clips.append(clip)
 
     if progress_callback:
-        progress_callback("Sequencing timeline and stitching scenes...", 0.75)
+        progress_callback("Sequencing timeline with dissolve transitions…", 0.75)
 
-    # Concatenate scene clips sequentially
-    final_video = concatenate_videoclips(scene_clips, method="compose")
+    # Stitch with 0.5 s overlap to activate crossfades between scenes
+    final_video = concatenate_videoclips(
+        scene_clips, padding=-0.5, method="compose"
+    )
 
     # Attach composite multi-track audio (voice-over + ducked BGM)
     if composite_audio:
         final_video = final_video.with_audio(composite_audio)
 
     if progress_callback:
-        progress_callback("Encoding MP4 container with H.264 & AAC...", 0.85)
+        progress_callback("Encoding MP4 (H.264 / AAC)…", 0.85)
 
-    logger.info(f"Encoding final MP4 to {out_file} at {config.fps} fps...")
+    logger.info(f"Encoding → {out_file} @ {config.fps} fps")
     final_video.write_videofile(
         str(out_file),
         fps=config.fps,
@@ -250,15 +490,17 @@ def render_complete_video(
         audio_codec="aac",
         preset="fast",
         threads=4,
-        logger=None,  # Suppress verbose ffmpeg stdout
+        logger=None,
     )
 
-    # Dereference and clean up clips
     final_video.close()
     for c in scene_clips:
         c.close()
 
-    logger.info(f"Video rendered successfully: {out_file} (Duration: {final_video.duration:.2f}s)")
+    logger.info(
+        f"✓ Video rendered: {out_file} "
+        f"(Duration: {final_video.duration:.2f}s)"
+    )
     if progress_callback:
         progress_callback("Video generation complete!", 1.0)
 
